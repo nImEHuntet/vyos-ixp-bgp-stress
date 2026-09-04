@@ -1,0 +1,266 @@
+# T2 — IXP-realistic. The flagship tier.
+#
+# Route servers carrying most of the table, a long tail of bilateral peers, two
+# transit providers, and ExaBGP peers doing protocol damage. Prefix counts are
+# chosen to sit just under the maximum-prefix values the NE-1849 template already
+# sets on each peer-group, so the limits are exercised without being tripped:
+#
+#   ixp1-rs4 400000 | ixp1-rs6 100000 | ixp2-rs4 200000 | ixp2-rs6 100000
+#   ixp{1,2}-peer{4,6} 200   <- note how small the bilateral limit is
+#
+# Needs a 64 GB / 16-core host. Expect the first run to take ~40 minutes.
+name: t2-ixp-realistic
+description: >
+  Two route servers on IXP-1 and one on IXP-2 carrying the bulk of the table, 140
+  bilateral peers, two full-table transit providers, and four ExaBGP peers running
+  the policy-probe and RFC 7606 suites. This is the tier that answers "does the
+  NE-1849 config survive a real exchange".
+
+dut:
+  name: vyos
+  asn: 64000            # safe: outside every asn-bogons range in the template
+  router_id: 100.64.0.1
+  image: vyos-stress:latest
+  memory: 48Gb
+  cpu: 12
+  ssh_user: admin
+  ssh_pass: admin
+  mgmt_vrf: false       # see dutconfig.py — containerlab owns eth0
+
+host:
+  bridges: [br-ixp1, br-ixp2]
+  mtu: 9000
+
+fabrics:
+  ixp1:
+    bridge: br-ixp1
+    vlan: null                    # untagged, as in the template
+    v4_net: 198.51.96.0/20        # widened: /24 cannot hold 140 peers
+    v6_net: 2001:db8:1::/64       # RFC 3849
+    dut_host: 1
+    dut_iface: eth1
+    peer_host_base: 11
+  ixp2:
+    bridge: br-ixp2
+    vlan: 200                     # tagged, as in the template
+    v4_net: 203.0.112.0/20
+    v6_net: 2001:db8:2::/64
+    dut_host: 1
+    dut_iface: eth2
+    peer_host_base: 11
+
+own:
+  supernet4: 100.64.0.0/16        # RFC 6598; not in the template's ipv4-bogons
+  local4: 100.64.1.0/24
+  supernet6: 3fff:100::/32        # RFC 9637 documentation space
+  local6: 3fff:100:1::/48
+
+lc:
+  ixp1: 1001
+  ixp2: 1002
+
+rpki:
+  enabled: false
+
+nlri:
+  v4_first_octets: "1-9,11-99"    # excludes the /8s ipv4-bogons rejects
+  v4_len: 24
+  v6_base: 3fff::/20
+  v6_len: 48
+  seed: 20260810
+  contested_fraction: 0.15        # 15% of each peer's NLRI is also advertised
+  contested_pool_v4: 120000       # by others, so bestpath actually has work
+  contested_pool_v6: 40000
+
+instrumentation:
+  frr_descriptors: 16384
+  update_delay:
+    max_delay: 300
+    establish_wait: 60
+  suppress_fib_pending: false     # correctness win, but adds a 1000 ms default
+                                  # batching window to every advertisement
+  input_queue_limit: 50000
+  output_queue_limit: 50000
+  graceful_restart:
+    enabled: true
+    stalepath_time: 360
+  prometheus:
+    enabled: false
+  bmp:
+    enabled: false
+
+fleets:
+  # --- IXP-1: route servers carry the bulk of the table -------------------
+  - id: ixp1-rs
+    fabric: ixp1
+    engine: gobgp
+    role: route-server            # RFC 7947: AS_PATH transparent, no prepend
+    peers: 2
+    per_container: 1              # one container each: these are the heavy hitters
+    asn_base: 64200
+    afi: [ipv4, ipv6]
+    prefixes_v4: 380000           # peer-group limit is 400000
+    prefixes_v6: 90000            # peer-group limit is 100000
+    dut_peer_group4: ixp1-rs4
+    dut_peer_group6: ixp1-rs6
+    max_prefix4: 400000
+    max_prefix6: 100000
+    timers: {keepalive: 30, holdtime: 90}
+    memory: 8Gb
+    flappable: true
+
+  - id: ixp1-bilat
+    fabric: ixp1
+    engine: gobgp
+    role: bilateral
+    peers: 80
+    per_container: 10
+    asn_base: 64001
+    afi: [ipv4, ipv6]
+    prefixes_v4: 5000              # was 180, capped by the template's peer-group maximum-prefix 200 (defect 9)
+    prefixes_v6: 1000               # was 90, same cause
+    dut_peer_group4: ixp1-peer4
+    dut_peer_group6: ixp1-peer6
+    timers: {keepalive: 30, holdtime: 90}
+    flappable: true
+
+  # --- IXP-2 --------------------------------------------------------------
+  - id: ixp2-rs
+    fabric: ixp2
+    engine: gobgp
+    role: route-server
+    peers: 1
+    per_container: 1
+    asn_base: 64250
+    afi: [ipv4, ipv6]
+    prefixes_v4: 190000           # peer-group limit is 200000
+    prefixes_v6: 90000
+    dut_peer_group4: ixp2-rs4
+    dut_peer_group6: ixp2-rs6
+    max_prefix4: 200000
+    max_prefix6: 100000
+    timers: {keepalive: 30, holdtime: 90}
+    memory: 6Gb
+    flappable: true
+
+  - id: ixp2-bilat
+    fabric: ixp2
+    engine: gobgp
+    role: bilateral
+    peers: 60
+    per_container: 10
+    asn_base: 64301
+    afi: [ipv4, ipv6]
+    prefixes_v4: 5000              # was 180, capped by the template's peer-group maximum-prefix 200 (defect 9)
+    prefixes_v6: 1000               # was 90, same cause
+    dut_peer_group4: ixp2-peer4
+    dut_peer_group6: ixp2-peer6
+    timers: {keepalive: 30, holdtime: 90}
+    flappable: true
+
+  # --- transit: no maximum-prefix on transit4/transit6 in the template -----
+  - id: transit
+    fabric: ixp1
+    engine: gobgp
+    role: transit
+    peers: 2
+    per_container: 1
+    asn_base: 64450
+    afi: [ipv4, ipv6]
+    prefixes_v4: 300000
+    prefixes_v6: 70000
+    dut_peer_group4: transit4
+    dut_peer_group6: transit6
+    timers: {keepalive: 30, holdtime: 90}
+    memory: 6Gb
+    flappable: true
+
+  # --- ExaBGP: probes and protocol damage ---------------------------------
+  - id: ixp1-nasty
+    fabric: ixp1
+    engine: exabgp
+    role: nasty
+    peers: 2
+    per_container: 2
+    asn_base: 64400
+    afi: [ipv4, ipv6]
+    prefixes_v4: 150
+    prefixes_v6: 80
+    dut_peer_group4: ixp1-peer4
+    dut_peer_group6: ixp1-peer6
+    timers: {holdtime: 90}
+    flappable: false
+
+  - id: ixp2-nasty
+    fabric: ixp2
+    engine: exabgp
+    role: nasty
+    peers: 2
+    per_container: 2
+    asn_base: 64420
+    afi: [ipv4, ipv6]
+    prefixes_v4: 150
+    prefixes_v6: 80
+    dut_peer_group4: ixp2-peer4
+    dut_peer_group6: ixp2-peer6
+    timers: {holdtime: 90}
+    flappable: false
+
+scenario:
+  duration_s: 3600
+  warmup_s: 420
+  seed: 20260810
+  sample_interval_s: 3.0
+  min_gap_s: 5
+  max_gap_s: 45
+  events:
+    # The mix is weighted for what a router peering with real Tier-1 and IXP
+    # networks actually meets: links that go down or degrade, remote routers
+    # that restart or stop forwarding, and full tables that churn. The
+    # adversarial cases (malformed attributes, a deliberate prefix-limit trip)
+    # are kept at low weight as periodic diagnostics — real ISPs are not
+    # attackers, and the question here is whether the DUT stays up and keeps
+    # forwarding, not whether it survives a hostile peer.
+    #
+    # session churn — the single most common real-world event
+    - {kind: peer_flap, weight: 22, mode: admin_down, count: 3, down_s: [5, 45]}
+    - {kind: peer_flap, weight: 14, mode: link_down, count: 1, down_s: [10, 60]}
+    - {kind: peer_flap, weight: 8,  mode: notification, count: 2}
+    # a remote router that stops forwarding but keeps the TCP session: the
+    # "degraded ISP router" case, and the only path to FRR's send-queue teardown
+    - {kind: blackhole_peer, weight: 5}
+    # remote router restart, with and without a NOTIFICATION (GR vs no GR)
+    - {kind: gr_event, weight: 5, mode: process_kill, down_s: 25}
+    - {kind: gr_event, weight: 4, mode: process_term, down_s: 25}
+    # RIB churn
+    - {kind: churn, weight: 14, mode: flap_same, fraction: 0.25, count: 3}
+    - {kind: churn, weight: 10, mode: walk, fraction: 0.15, count: 2}
+    - {kind: churn, weight: 10, mode: attr_churn, fraction: 0.40, count: 2}
+    - {kind: churn, weight: 6,  mode: withdraw_storm, fraction: 0.60, count: 1}
+    # operator activity on a router already carrying a full table
+    - {kind: policy_churn, weight: 12, hold_s: 30,
+       fragments: [localpref-flip, community-retag, prefixlist-grow, aspath-filter,
+                   export-tighten, pg-routemap-swap]}
+    - {kind: soft_clear, weight: 6, target: all, direction: in}
+    # path degradation: latency, jitter and loss on the peering LAN. Weighted up
+    # because a degraded link is far more common than a clean failure, and it
+    # produces a failure shape that is easy to mistake for CPU saturation.
+    - {kind: netem, weight: 12, delay_ms: 25, jitter_ms: 8, loss_pct: 0.3, duration_s: 45}
+    # diagnostics, not load
+    - {kind: probe_check, weight: 5}
+    - {kind: malformed_burst, weight: 1}
+    - {kind: maxprefix_trip, weight: 1}
+
+budgets:
+  convergence_s: 420
+  bgpd_rss_mb: 24576
+  zebra_rss_mb: 12288   # T2 measured a 5.92 GB peak; 8192 left no headroom
+  # Measured, not guessed: `pg-routemap-swap` apply took 343.1 s on the T2 run
+  # at 2.80M paths — a single VyOS `set` on a peer-group. The budget is the
+  # threshold a *result* is compared against, so it has to sit above what the
+  # platform actually does or the run fails on the threshold instead of on a
+  # finding. zebra RSS also peaked at 5.92 GB, above the old 8192 budget's
+  # headroom once churn is added.
+  commit_s: 420
+  max_failed_peers: 0
+  allow_sendq_warn: true

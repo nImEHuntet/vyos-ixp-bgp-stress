@@ -1,0 +1,162 @@
+# T0 — smoke test. Validates the whole pipeline on a laptop-class host.
+# ~2 400 paths. If this does not converge, nothing above it will.
+name: t0-smoke
+description: >
+  Minimal dual-IXP lab: two GoBGP bilateral peers on IXP-1, one on IXP-2, and one
+  ExaBGP peer for the policy-probe and malformed-attribute suites. Use this to
+  prove the VyOS image, the bridges, the addressing and the DUT config all work
+  before spending an hour on a large tier.
+
+dut:
+  name: vyos
+  asn: 64000            # safe: outside every asn-bogons range in the template
+  router_id: 100.64.0.1
+  image: vyos-stress:latest
+  memory: 4Gb
+  cpu: 2
+  ssh_user: admin
+  ssh_pass: admin
+  mgmt_vrf: false       # see dutconfig.py — containerlab owns eth0
+
+host:
+  bridges: [br-ixp1, br-ixp2]
+  mtu: 9000
+
+fabrics:
+  ixp1:
+    bridge: br-ixp1
+    vlan: null                    # untagged, as in the template
+    v4_net: 198.51.100.0/24       # RFC 5737
+    v6_net: 2001:db8:1::/64       # RFC 3849
+    dut_host: 1
+    dut_iface: eth1
+    peer_host_base: 11
+  ixp2:
+    bridge: br-ixp2
+    vlan: 200                     # tagged, as in the template
+    v4_net: 203.0.113.0/24
+    v6_net: 2001:db8:2::/64
+    dut_host: 1
+    dut_iface: eth2
+    peer_host_base: 11
+
+own:
+  supernet4: 100.64.0.0/16        # RFC 6598; not in the template's ipv4-bogons
+  local4: 100.64.1.0/24
+  supernet6: 3fff:100::/32        # RFC 9637 documentation space
+  local6: 3fff:100:1::/48
+
+lc:
+  ixp1: 1001
+  ixp2: 1002
+
+rpki:
+  enabled: false
+
+nlri:
+  v4_first_octets: "1-9,11-99"    # excludes the /8s ipv4-bogons rejects
+  v4_len: 24
+  v6_base: 3fff::/20
+  v6_len: 48
+  seed: 20260810
+  contested_fraction: 0.15        # 15% of each peer's NLRI is also advertised
+  contested_pool_v4: 200          # by others, so bestpath actually has work
+  contested_pool_v6: 200
+
+instrumentation:
+  frr_descriptors: 8192
+  update_delay:
+    max_delay: 60
+    establish_wait: 10
+  graceful_restart:
+    enabled: true
+    stalepath_time: 360
+  prometheus:
+    enabled: false
+  bmp:
+    enabled: false
+
+fleets:
+  - id: ixp1-bilat
+    fabric: ixp1
+    engine: gobgp
+    role: bilateral
+    peers: 2
+    per_container: 2
+    asn_base: 64001
+    afi: [ipv4, ipv6]
+    prefixes_v4: 180              # peer-group ixp1-peer4 max-prefix is 200
+    prefixes_v6: 90               # peer-group ixp1-peer6 max-prefix is 200
+    dut_peer_group4: ixp1-peer4
+    dut_peer_group6: ixp1-peer6
+    timers: {keepalive: 10, holdtime: 30}
+    flappable: true
+
+  - id: ixp1-rs
+    fabric: ixp1
+    engine: gobgp
+    role: route-server
+    peers: 1
+    per_container: 1
+    asn_base: 64200
+    afi: [ipv4, ipv6]
+    prefixes_v4: 1000
+    prefixes_v6: 400
+    dut_peer_group4: ixp1-rs4
+    dut_peer_group6: ixp1-rs6
+    max_prefix4: 320000
+    max_prefix6: 100000
+    timers: {keepalive: 10, holdtime: 30}
+    flappable: true
+
+  - id: ixp2-bilat
+    fabric: ixp2
+    engine: gobgp
+    role: bilateral
+    peers: 1
+    per_container: 1
+    asn_base: 64301
+    afi: [ipv4, ipv6]
+    prefixes_v4: 180
+    prefixes_v6: 90
+    dut_peer_group4: ixp2-peer4
+    dut_peer_group6: ixp2-peer6
+    timers: {keepalive: 10, holdtime: 30}
+    flappable: true
+
+  # ExaBGP: protocol-nastiness and the policy-probe suite. Kept unflappable so
+  # the probe results are not confounded by the session bouncing underneath them.
+  - id: ixp1-nasty
+    fabric: ixp1
+    engine: exabgp
+    role: nasty
+    peers: 1
+    per_container: 1
+    asn_base: 64400
+    afi: [ipv4, ipv6]
+    prefixes_v4: 20
+    prefixes_v6: 10
+    dut_peer_group4: ixp1-peer4
+    dut_peer_group6: ixp1-peer6
+    timers: {holdtime: 90}
+    flappable: false
+
+scenario:
+  duration_s: 600
+  warmup_s: 90
+  seed: 20260810
+  sample_interval_s: 2.0
+  events:
+    - {kind: peer_flap, weight: 30, mode: admin_down, down_s: [5, 20]}
+    - {kind: peer_flap, weight: 10, mode: notification}
+    - {kind: churn, weight: 25, mode: flap_same, fraction: 0.3}
+    - {kind: churn, weight: 15, mode: walk, fraction: 0.2}
+    - {kind: churn, weight: 10, mode: attr_churn, fraction: 0.5}
+    - {kind: policy_churn, weight: 10, fragments: [localpref-flip, community-retag]}
+
+budgets:
+  convergence_s: 60
+  bgpd_rss_mb: 1024
+  zebra_rss_mb: 512
+  commit_s: 60
+  max_failed_peers: 0

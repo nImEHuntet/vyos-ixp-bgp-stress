@@ -1,0 +1,26 @@
+# Harness runtime. Deliberately minimal: the generators run in containers, so the
+# harness itself only needs to build configs and parse JSON.
+PyYAML>=6.0
+
+# ---------------------------------------------------------------------------
+# Optional, for offline verification only (tests/selftest.py). Neither is needed
+# to run a lab, and neither affects what the lab does — the peer containers pin
+# their own versions (ExaBGP 5.0.9, GoBGP 4.8.0).
+#
+#   pip install 'exabgp>=5' 'mrtparse>=2.1'
+#
+# Both tools changed interface between major versions, silently:
+#
+#   exabgp 5.x   subcommand CLI  `exabgp validate -n|-r <conf>`   <- preferred
+#   exabgp 4.x   flag CLI        `exabgp --test <conf>`           <- works, but has
+#                no separate route-reparse mode, and rejects AS_SET and
+#                hand-encoded AS_PATH syntax, so 3 malformed-attribute cases are
+#                skipped rather than validated.
+#   mrtparse 2.1+  payload on entry.data (dict)                  <- preferred
+#   mrtparse 1.x   payload on entry.mrt  (attributes)            <- supported
+#   mrtparse 2.0.x subtype is a list; unsupported, will be skipped
+#
+# selftest detects which is installed and adapts. If it cannot, the affected
+# check is SKIPPED, never failed — a missing or mismatched verification library
+# says nothing about whether the generated lab is correct. MRT structural
+# validation is dependency-free (tests/mrtcheck.py) and always runs.
